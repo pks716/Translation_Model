@@ -1,0 +1,48 @@
+import cv2  
+
+import subprocess
+
+session_name = subprocess.check_output(["tmux", "display-message", "-p", "#S"], text=True).strip()
+
+
+wand_db_boolean = True
+
+PROJECT = "CT2_MR_Pelvis"
+EXPERIMENT_NAME = 'cond_resvit'
+continue_path = ""
+
+
+data_directory = "/storage/ss_peeyush/MRI_CT_Models-main/DataCreation/Data"
+
+# rm_DSStore(data_directory)
+ # either 'MR2CT' or 'CT2MR'
+# This is only for dataloaders, changes in training_procedures need to be manual.
+# CT will always be the first argument returnned by the dataloader
+
+evaluating_run_boolean = True # Keep False while training
+
+
+HP = {
+    'DEVICE' : 'cuda:0',
+
+    'model_params':{
+        'type': 'cond_resvit',
+        'num_channels': 32
+    },
+    'System': "Ruby",
+    'TMUX' : session_name,
+    "batch_size": 32,
+    "learning_rate": 1e-3,
+    "epochs": 100,
+    'loss_weights' : {
+
+    },
+    'inference_interpolation_mode' : 'bilinear',
+    'inference_interpolation_allign_cornors' : False,
+    'training_type' : 'CT2MR' 
+}
+
+helper_parameters= {
+    'align_corners' : True
+}
+
