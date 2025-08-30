@@ -5,14 +5,15 @@ import subprocess
 session_name = subprocess.check_output(["tmux", "display-message", "-p", "#S"], text=True).strip()
 
 
-wand_db_boolean = True
+wand_db_boolean = False
 
-PROJECT = "CT2_MR_Pelvis"
-EXPERIMENT_NAME = 'cond_resvit'
+# PROJECT = "CT2_MR_Pelvis_only_T2W"
+PROJECT = "CT2_MR_Pelvis_only_T2W_rectal"
+EXPERIMENT_NAME = 'esau-rectal'
 continue_path = ""
 
 
-data_directory = "/storage/ss_peeyush/MRI_CT_Models-main/DataCreation/Data"
+data_directory = "/home/pks/Desktop/Peeyush/Project/pelvis/MRI_CT_models/MRI_CT_Models-main/DataCreation/rectal/slices"
 
 # rm_DSStore(data_directory)
  # either 'MR2CT' or 'CT2MR'
@@ -26,14 +27,14 @@ HP = {
     'DEVICE' : 'cuda:0',
 
     'model_params':{
-        'type': 'cond_resvit',
+        'type': 'esau-atlas',
         'num_channels': 32
     },
     'System': "Ruby",
     'TMUX' : session_name,
-    "batch_size": 32,
+    "batch_size": 1,
     "learning_rate": 1e-3,
-    "epochs": 100,
+    "epochs": 50,
     'loss_weights' : {
 
     },

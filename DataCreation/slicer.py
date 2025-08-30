@@ -21,8 +21,9 @@ import os
 import nibabel as nib
 import argparse
 from multiprocessing import Pool
+import cv2
 
-from slicer_parameters import view, view_index_hh, destination_directory, data_directory, full_dataset, all_slices, per_sample_normalize
+from slicer_parameters import view, view_index_hh, destination_directory, data_directory, full_dataset, all_slices, per_sample_normalize, exclude_start_slices, exclude_end_slices, slice_size
 from pre_processing import pre_processing_order
 
 view_key, view_index = False, 4
@@ -36,7 +37,6 @@ if not view_key:
 
 path = 'data_original/train'
 path2 = 'data_fin/val'
-
 
 path = data_directory
 destination = destination_directory
@@ -68,6 +68,70 @@ def read_nifti_to_numpy(file_path):
         return None
 
 
+def crop_and_pad_with_mask(image_slice, mask_slice, target_size=(256, 256)):
+    """
+    Crop the image slice using the mask to extract anatomy region,
+    then pad back to target size while preserving aspect ratio.
+    
+    Args:
+        image_slice: 2D numpy array of the image slice
+        mask_slice: 2D numpy array of the mask slice (binary or non-zero values indicate anatomy)
+        target_size: tuple of (height, width) for final output size
+    
+    Returns:
+        Processed image slice of target_size
+    """
+    # Convert mask to binary if not already
+    binary_mask = (mask_slice > 0).astype(np.uint8)
+    
+    # Find bounding box of the mask
+    coords = np.where(binary_mask)
+    if len(coords[0]) == 0:
+        # If no mask found, return resized original image
+        print("Warning: Empty mask found, returning resized original")
+        return cv2.resize(image_slice, target_size, interpolation=cv2.INTER_LINEAR)
+    
+    # Get bounding box coordinates
+    y_min, y_max = coords[0].min(), coords[0].max()
+    x_min, x_max = coords[1].min(), coords[1].max()
+    
+    # Add small padding around the bounding box (optional, can be adjusted)
+    padding = 10
+    y_min = max(0, y_min - padding)
+    y_max = min(image_slice.shape[0], y_max + padding)
+    x_min = max(0, x_min - padding)
+    x_max = min(image_slice.shape[1], x_max + padding)
+    
+    # Crop the image to the bounding box
+    cropped_image = image_slice[y_min:y_max, x_min:x_max]
+    
+    # Calculate aspect ratio of cropped region
+    crop_h, crop_w = cropped_image.shape
+    target_h, target_w = target_size
+    
+    # Calculate scaling to fit the cropped image into target size while preserving aspect ratio
+    scale_h = target_h / crop_h
+    scale_w = target_w / crop_w
+    scale = min(scale_h, scale_w)
+    
+    # Resize cropped image
+    new_h = int(crop_h * scale)
+    new_w = int(crop_w * scale)
+    resized_cropped = cv2.resize(cropped_image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    
+    # Create output image of target size
+    output_image = np.zeros(target_size, dtype=image_slice.dtype)
+    
+    # Calculate position to center the resized cropped image
+    start_y = (target_h - new_h) // 2
+    start_x = (target_w - new_w) // 2
+    
+    # Place the resized cropped image in the center
+    output_image[start_y:start_y + new_h, start_x:start_x + new_w] = resized_cropped
+    
+    return output_image
+
+
 def populate(scan_path,
             destination_directory):
     # print(scan_path.split('/'))
@@ -79,39 +143,48 @@ def populate(scan_path,
         os.makedirs(f'{destination_directory}/{patient_name}/mr/processed')
     if not os.path.exists(f'{destination_directory}/{patient_name}/ct/processed'):
         os.makedirs(f'{destination_directory}/{patient_name}/ct/processed')
-    # if not os.path.exists(f'{destination_directory}/{patient_name}/mask/processed'):
-    #     os.makedirs(f'{destination_directory}/{patient_name}/mask/processed')
+    if not os.path.exists(f'{destination_directory}/{patient_name}/mask/processed'):
+        os.makedirs(f'{destination_directory}/{patient_name}/mask/processed')
         
     if not os.path.exists(f'{destination_directory}/{patient_name}/mr/original'):
         os.makedirs(f'{destination_directory}/{patient_name}/mr/original')
     if not os.path.exists(f'{destination_directory}/{patient_name}/ct/original'):
         os.makedirs(f'{destination_directory}/{patient_name}/ct/original')
-    # if not os.path.exists(f'{destination_directory}/{patient_name}/mask/original'):
-    #     os.makedirs(f'{destination_directory}/{patient_name}/mask/original')
+    if not os.path.exists(f'{destination_directory}/{patient_name}/mask/original'):
+        os.makedirs(f'{destination_directory}/{patient_name}/mask/original')
         
     def read_and_convert(scan_path):
         print("Loading", scan_path)
         mr_vol = read_nifti_to_numpy(f'{scan_path}/mr.nii.gz')
         ct_vol = read_nifti_to_numpy(f'{scan_path }/ct.nii.gz')
-        # mask_vol = read_nifti_to_numpy(f'{scan_path }/mask.nii.gz')
+        mask_vol = read_nifti_to_numpy(f'{scan_path }/mask.nii.gz')
 
         # print(mr_vol, ct_vol)
-        if mr_vol.shape != ct_vol.shape:
+        if mr_vol.shape != ct_vol.shape or mr_vol.shape != mask_vol.shape:
             print("Volume size mismatch at index--", scan_path)
 
         "train/{patient_name}/mri.---"
         if view_index > 2:
             raise ValueError("Set view in slicer_parameters as axial, coronal or sagittal")
 
-
         mr_max, mr_min = np.max(mr_vol), np.min(mr_vol)
         ct_vol = np.clip(ct_vol, -1024, 3000)
         ct_max, ct_min = np.max(ct_vol), np.min(ct_vol)
-            
-            
         
-        for l in range(mr_vol.shape[view_index]):
+        # Calculate slice range with exclusions
+        total_slices = mr_vol.shape[view_index]
+        start_idx = exclude_start_slices
+        end_idx = total_slices - exclude_end_slices
+        
+        # Ensure we don't have invalid ranges
+        if start_idx >= end_idx:
+            print(f"Warning: Volume {patient_name} has too few slices ({total_slices}) for exclusion parameters")
+            start_idx = 0
+            end_idx = total_slices
+        
+        for l in range(start_idx, end_idx):
             if not all_slices:
+                # Original logic for limiting slices when all_slices is False
                 if l < mr_vol.shape[view_index]//2:
                     continue
                 if l > (mr_vol.shape[view_index]//2 + 5):
@@ -120,15 +193,15 @@ def populate(scan_path,
             if view_key == 'axial':                
                 mr_slice = mr_vol[:,:,l]
                 ct_slice = ct_vol[:,:,l]
-                # mask = mask_vol[:,:,l]
+                mask = mask_vol[:,:,l]
             elif view_key == 'coronal':
                 mr_slice = mr_vol[:,l,:]
                 ct_slice = ct_vol[:,l,:]
-                # mask = mask_vol[:,l,:]
+                mask = mask_vol[:,l,:]
             elif view_key == 'saggital':
                 mr_slice = mr_vol[l,:,:]
                 ct_slice = ct_vol[l,:,:]
-                # mask = mask_vol[l,:,:]
+                mask = mask_vol[l,:,:]
             else:
                 raise ValueError("Set view in slicer_parameters as axial, coronal or saggital")
             
@@ -136,8 +209,14 @@ def populate(scan_path,
                 mr_slice = (mr_slice-mr_min)/(mr_max-mr_min)
                 ct_slice = (ct_slice-ct_min)/(ct_max-ct_min)
             
-            # ct_slice_processed, mr_slice_processed, mask_processed = np.copy(ct_slice), np.copy(mr_slice), np.copy(mask)
-            ct_slice_processed, mr_slice_processed = np.copy(ct_slice), np.copy(mr_slice)
+            # Apply mask-based cropping and padding BEFORE other preprocessing
+            mr_slice_cropped = crop_and_pad_with_mask(mr_slice, mask, slice_size)
+            ct_slice_cropped = crop_and_pad_with_mask(ct_slice, mask, slice_size)
+            
+            # Also process the mask itself for consistency
+            mask_cropped = crop_and_pad_with_mask(mask.astype(np.float32), mask, slice_size)
+            
+            ct_slice_processed, mr_slice_processed, mask_processed = np.copy(ct_slice_cropped), np.copy(mr_slice_cropped), np.copy(mask_cropped)
 
             # This is for extra pre-processing steps on training data. The original data should remain untouched.
             for method, target in pre_processing_order:
@@ -145,20 +224,18 @@ def populate(scan_path,
                     ct_slice_processed = method(ct_slice_processed)
                 if 'mri' in target:
                     mr_slice_processed = method(mr_slice_processed)
-                # if 'mask' in target:
-                #     mask_processed = method(mask_processed)
-                # raise ValueError("Incorrect Key in pre_processing_methods. Expected ordered pair as (function_name, [targets..]). targer can me 'mri and/or 'ct")
+                if 'mask' in target:
+                    mask_processed = method(mask_processed)
+            
             np.savez_compressed(f'{destination_directory}/{patient_name}/mr/processed/{patient_name}_processed_{view_key}_{l}.npz', mr_slice_processed)
             np.savez_compressed(f'{destination_directory}/{patient_name}/ct/processed/{patient_name}_processed_{view_key}_{l}.npz', ct_slice_processed)
-            # np.savez_compressed(f'{destination_directory}/{patient_name}/mask/processed/{patient_name}_processed_{view_key}_{l}.npz', mask_processed)
+            np.savez_compressed(f'{destination_directory}/{patient_name}/mask/processed/{patient_name}_processed_{view_key}_{l}.npz', mask_processed)
                 
-            np.savez_compressed(f'{destination_directory}/{patient_name}/mr/original/{patient_name}_original_{view_key}_{l}.npz', mr_slice)
-            np.savez_compressed(f'{destination_directory}/{patient_name}/ct/original/{patient_name}_original_{view_key}_{l}.npz', ct_slice)
-            # np.savez_compressed(f'{destination_directory}/{patient_name}/mask/original/{patient_name}_original_{view_key}_{l}.npz', mask)
+            # Save the cropped versions as "original" since they're the base after mask cropping
+            np.savez_compressed(f'{destination_directory}/{patient_name}/mr/original/{patient_name}_original_{view_key}_{l}.npz', mr_slice_cropped)
+            np.savez_compressed(f'{destination_directory}/{patient_name}/ct/original/{patient_name}_original_{view_key}_{l}.npz', ct_slice_cropped)
+            np.savez_compressed(f'{destination_directory}/{patient_name}/mask/original/{patient_name}_original_{view_key}_{l}.npz', mask_cropped)
             print("Saved to", f"{destination_directory}/{patient_name}")
-
-            
-            
 
     read_and_convert(scan_path)
 

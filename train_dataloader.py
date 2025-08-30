@@ -11,7 +11,7 @@ class train_dataset(Dataset):
         
         ct_paths= [os.path.join(path,'ct/processed') for path in paths if '.DS_Store' not in path]
         mr_paths = [os.path.join(path,'mr/processed') for path in paths if '.DS_Store' not in path]
-        # mask_paths = [os.path.join(path,'mask/processed') for path in paths if '.DS_Store' not in path]
+        mask_paths = [os.path.join(path,'mask/processed') for path in paths if '.DS_Store' not in path]
         # These now contain all directories
         # print('---?>', ct_paths)
         # input()
@@ -26,10 +26,10 @@ class train_dataset(Dataset):
             ct_temp = os.listdir(scan_path)
             for slice in ct_temp:
                 self.mr_slices.append(os.path.join(scan_path, slice))
-        # for scan_path in mask_paths:
-        #     ct_temp = os.listdir(scan_path)
-        #     for slice in ct_temp:
-        #         self.mask_slices.append(os.path.join(scan_path, slice))
+        for scan_path in mask_paths:
+            ct_temp = os.listdir(scan_path)
+            for slice in ct_temp:
+                self.mask_slices.append(os.path.join(scan_path, slice))
                 
                 
         # for slice in mr_paths:
@@ -59,9 +59,9 @@ class train_dataset(Dataset):
         "DO AS YOU PLEASE HERE"
         
         
-        # if self.mask_boolean:    
-        #     mask = np.load(self.mask_slices[idx])['arr_0']
-        #     mask = torch.tensor(mask, dtype=torch.float32)
-        #     return ct, mr , mask
+        if self.mask_boolean:    
+            mask = np.load(self.mask_slices[idx])['arr_0']
+            mask = torch.tensor(mask, dtype=torch.float32)
+            return ct, mr , mask
         
         return ct ,mr

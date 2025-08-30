@@ -20,35 +20,35 @@ def leaf_folder(path):
 
 class test_dataset(Dataset):
     def __init__(self, paths, type, masks = True, transform=None):
-        # ct_paths= [os.path.join(paths,path,'ct/processed') for path in os.listdir(paths)]
-        # mr_paths = [os.path.join(paths,path,'mr/processed') for path in os.listdir(paths)]
-        # mask_paths = [os.path.join(paths,path,'mask/processed') for path in os.listdir(paths)]
+        ct_paths= [os.path.join(paths,path,'ct/processed') for path in os.listdir(paths)]
+        mr_paths = [os.path.join(paths,path,'mr/processed') for path in os.listdir(paths)]
+        mask_paths = [os.path.join(paths,path,'mask/processed') for path in os.listdir(paths)]
         self.type = type
         self.mask_boolean = masks
         
-        assert isinstance(paths, str), "Expecting one patient at a time for validation. Rest will be evluated once metrics for this one are taken."
+        assert isinstance(paths, str), "Expecting one patient at a time for validation. Rest will be evaluated once metrics for this one are taken."
         
         ct_path_processed = [os.path.join(paths,'ct/processed')]
         mr_path_processed = [os.path.join(paths,'mr/processed')]
-        # mask_path_processed = [os.path.join(paths,'mask/processed')]
+        mask_path_processed = [os.path.join(paths,'mask/processed')]
         
         ct_path_original = [os.path.join(paths,'ct/original')]
         mr_path_original = [os.path.join(paths,'mr/original')]
-        # mask_path_original = [os.path.join(paths,'mask/original')]
+        mask_path_original = [os.path.join(paths,'mask/original')]
 
         ct_path_processed = [pat for pat in ct_path_processed if '.DS_Store' not in pat]
         mr_path_processed = [pat for pat in mr_path_processed if '.DS_Store' not in pat]
-        # mask_path_processed = [pat for pat in mask_path_processed if '.DS_Store' not in pat]
+        mask_path_processed = [pat for pat in mask_path_processed if '.DS_Store' not in pat]
         ct_path_original = [pat for pat in ct_path_original if '.DS_Store' not in pat]
         mr_path_original = [pat for pat in mr_path_original if '.DS_Store' not in pat]
-        # mask_path_original = [pat for pat in mask_path_original if '.DS_Store' not in pat]
+        mask_path_original = [pat for pat in mask_path_original if '.DS_Store' not in pat]
         
 
-        # self.ct_slices_processed, self.mr_slices_processed, self.mask_slices_processed = [], [], []
-        # self.ct_slices_original, self.mr_slices_original, self.mask_slices_original = [], [], []
+        self.ct_slices_processed, self.mr_slices_processed, self.mask_slices_processed = [], [], []
+        self.ct_slices_original, self.mr_slices_original, self.mask_slices_original = [], [], []
 
-        self.ct_slices_processed, self.mr_slices_processed = [], []
-        self.ct_slices_original, self.mr_slices_original = [], []
+        # self.ct_slices_processed, self.mr_slices_processed = [], []
+        # self.ct_slices_original, self.mr_slices_original = [], []
 
         
         for scan_path in ct_path_processed:
@@ -63,11 +63,11 @@ class test_dataset(Dataset):
                 self.mr_slices_processed.append(os.path.join(scan_path, slice))
         self.mr_slices_processed = sorted(self.mr_slices_processed)
                 
-        # for scan_path in mask_path_processed:
-        #     temp = os.listdir(scan_path)
-        #     for slice in temp:
-        #         self.mask_slices_processed.append(os.path.join(scan_path, slice))
-        # self.mask_slices_processed = sorted(self.mask_slices_processed ) 
+        for scan_path in mask_path_processed:
+            temp = os.listdir(scan_path)
+            for slice in temp:
+                self.mask_slices_processed.append(os.path.join(scan_path, slice))
+        self.mask_slices_processed = sorted(self.mask_slices_processed ) 
 
         for scan_path in ct_path_original:
             ct_temp = os.listdir(scan_path)
@@ -81,11 +81,11 @@ class test_dataset(Dataset):
                 self.mr_slices_original.append(os.path.join(scan_path, slice))
         self.mr_slices_original = sorted(self.mr_slices_original)
         
-        # for scan_path in mask_path_original:
-        #     ct_temp = os.listdir(scan_path)
-        #     for slice in ct_temp:
-        #         self.mask_slices_original.append(os.path.join(scan_path, slice))
-        # self.mask_slices_original = sorted(self.mask_slices_original)        
+        for scan_path in mask_path_original:
+            ct_temp = os.listdir(scan_path)
+            for slice in ct_temp:
+                self.mask_slices_original.append(os.path.join(scan_path, slice))
+        self.mask_slices_original = sorted(self.mask_slices_original)        
                 
         # for slice in mr_paths:
         #     self.mr_slices.append(slice)
@@ -117,10 +117,10 @@ class test_dataset(Dataset):
             # ct_orignial = (ct_orignial-CT_MIN)/(CT_MAX-CT_MIN) 
             
             if self.mask_boolean:
-                # mask = np.load(self.mask_slices_original[idx])['arr_0']
-                # mask = torch.tensor(mask, dtype=torch.float32)
+                mask = np.load(self.mask_slices_original[idx])['arr_0']
+                mask = torch.tensor(mask, dtype=torch.float32)
                 
-                return ct_orignial, mr_processed#, mask
+                return ct_orignial, mr_processed, mask
             else:
                 return ct_orignial, mr_processed
             
@@ -136,10 +136,10 @@ class test_dataset(Dataset):
             # ct_processed = (ct_processed-CT_MIN)/(CT_MAX-CT_MIN) 
             
             if self.mask_boolean:
-                # mask = np.load(self.mask_slices_original[idx])['arr_0']
-                # mask = torch.tensor(mask, dtype=torch.float32)
+                mask = np.load(self.mask_slices_original[idx])['arr_0']
+                mask = torch.tensor(mask, dtype=torch.float32)
                 
-                return ct_processed, mr_original#, mask
+                return ct_processed, mr_original, mask
             else:
                 return ct_processed, mr_original
         else:
