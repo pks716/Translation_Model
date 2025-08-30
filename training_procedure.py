@@ -205,7 +205,32 @@ class CombinedLoss(nn.Module):
         total_loss = self.l1_weight * l1 + self.perceptual_weight * perceptual
         return total_loss
     
-criterion = CombinedLoss(l1_weight=1.0, perceptual_weight=0.1, device=DEVICE)
+# With hybrid loss that combines both:
+class HybridLoss(nn.Module):
+    def __init__(self, alpha=0.3, beta=0.7):
+        super().__init__()
+        self.alpha = alpha  # Weight for classification
+        self.beta = beta    # Weight for regression (L1 only, skip perceptual for now)
+        self.ce = nn.CrossEntropyLoss()
+        self.l1 = nn.L1Loss()  # Use simple L1 instead of combined loss
+    
+    def forward(self, pred_logits, target):
+        # Classification loss
+        class_targets = intensity_to_class(target.squeeze(1))  # [B, H, W]
+        class_loss = self.ce(pred_logits, class_targets)
+        
+        # Convert predictions back to continuous for regression loss
+        class_predictions = torch.softmax(pred_logits, dim=1)
+        continuous_pred = torch.sum(class_predictions * torch.arange(1000, device=pred_logits.device).view(1, -1, 1, 1) / 999.0, dim=1, keepdim=True)
+        
+        # Simple L1 loss (both should be [B, 1, H, W])
+        regression_loss = self.l1(continuous_pred, target)
+        
+        return self.alpha * class_loss + self.beta * regression_loss
+
+criterion = HybridLoss(alpha=0.5, beta=0.5)
+# criterion = CombinedLoss(l1_weight=1.0, perceptual_weight=0.1, device=DEVICE)
+# criterion = nn.CrossEntropyLoss()
 
 # Metrics calculation
 def calculate_val_metrics(output, target):
@@ -213,6 +238,17 @@ def calculate_val_metrics(output, target):
     psnr = 10 * torch.log10(1 / mse_loss)
     ssim_value = ssim(output, target, data_range=1.0, size_average=True)
     return psnr.item(), ssim_value.item()
+
+def intensity_to_class(intensity_tensor, num_classes=1000):
+    """Convert continuous intensities [0,1] to class indices [0, num_classes-1]"""
+    # Scale from [0,1] to [0, num_classes-1] 
+    class_indices = (intensity_tensor * (num_classes - 1)).long()
+    class_indices = torch.clamp(class_indices, 0, num_classes - 1)
+    return class_indices
+
+def class_to_intensity(class_tensor, num_classes=1000):
+    """Convert class indices back to continuous intensities"""
+    return class_tensor.float() / (num_classes - 1)
 
 split_resolved, epoch_resolved = True, True, 
 if continue_path:
@@ -222,9 +258,9 @@ for key, splitc in SPLITS.items():
     config = get_resvit_b16_config()
     # conditional_wrapper = ConditionalResViTWrapper(config, DEVICE, conditioning_mode='fusion_gate')
     # optimizer = conditional_wrapper.setup_optimizer(lr=HP['learning_rate'])
-    model = ESAU("Converter",in_channels=1,n_channels=HP['model_params']['num_channels'],out_channels=1).to(DEVICE)
+    # model = ESAU("Converter",in_channels=1,n_channels=HP['model_params']['num_channels'],out_channels=1).to(DEVICE)
     # model = ResViT(config=config, input_dim=1, img_size=256, output_dim=1, vis=False).to(DEVICE)
-    # model = UNet(in_channels=1, num_classes=1, base_channels=32, bilinear=True).to(DEVICE)
+    model = UNet(in_channels=1, num_classes=1000, base_channels=32, bilinear=True).to(DEVICE)
     # model = SwinUNet(256, 256, 1, 128, 1, 4, 2).to(DEVICE)
     # model = PTN_local(img_size=[256,256]).to(DEVICE)
 #     model = CascadedGaze(
@@ -250,8 +286,11 @@ for key, splitc in SPLITS.items():
 #     drop_path_rate=0.3
 # ).to(DEVICE)
 
-    model.load_state_dict(torch.load('/storage/ss_peeyush/MRI_CT_Models-main/sessions/ESAU_base_CT2MR/SPLIT_1/model_weights/psnr/epoch_99__split_1__.pth', map_location=DEVICE)['model_state_dict'])
-
+    # model.load_state_dict(torch.load('/home/pks/Desktop/Peeyush/Project/pelvis/sessions/Unet_base_CT2MR/SPLIT_1/model_weights/psnr/epoch_99__split_1__.pth', map_location=DEVICE)['model_state_dict'], strict=False)
+    checkpoint = torch.load('/home/pks/Desktop/Peeyush/Project/pelvis/sessions/Unet_base_CT2MR/SPLIT_1/model_weights/psnr/epoch_99__split_1__.pth', map_location=DEVICE)['model_state_dict']
+    checkpoint.pop('outc.conv.weight', None)
+    checkpoint.pop('outc.conv.bias', None)
+    model.load_state_dict(checkpoint, strict=False)
 
     optimizer = optim.Adam(model.parameters(), lr=HP['learning_rate'])
     scheduler = StepLR(optimizer, step_size=10, gamma=0.5)
@@ -316,7 +355,15 @@ for key, splitc in SPLITS.items():
             mr_fake = model(ct_batch)
             optimizer.zero_grad()
             
-            loss =  criterion(mr_fake, mr_batch)
+            # # NEW: Convert MR to class labels
+            # mr_labels = intensity_to_class(mr_batch.squeeze(1), num_classes=1000)  # Remove channel dim for CrossEntropy
+            # # loss =  criterion(mr_fake, mr_batch)
+
+            # # Convert MR intensities to class labels
+            # # mr_labels = intensity_to_class(mr_batch.squeeze(1), num_classes=1000)  # Remove channel dim: [B, H, W]
+            # loss = criterion(mr_fake, mr_labels)
+
+            loss = criterion(mr_fake, mr_batch) 
             
             loss.backward()
             optimizer.step()
@@ -386,7 +433,12 @@ for key, splitc in SPLITS.items():
                     target_real = mr.to(DEVICE).unsqueeze(1)
                     # mask = mask.to(DEVICE)
                     
-                    target_fake = model(source_real)
+                    # target_fake = model(source_real)
+                    # With:
+                    logits = model(source_real)  # [B, 1000, H, W]
+                    class_predictions = torch.softmax(logits, dim=1)  # Convert to probabilities
+                    # Weighted average to get continuous intensity
+                    target_fake = torch.sum(class_predictions * torch.arange(1000, device=DEVICE).view(1, -1, 1, 1) / 999.0, dim=1, keepdim=True)
                                         
                     for fn in post_processing_order:
                         target_fake = fn(target_fake)
