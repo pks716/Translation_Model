@@ -5,7 +5,7 @@ all_patients = os.listdir(data_directory)
 all_patients = sorted([p for p in all_patients if '.DS_Store' not in p])
 
 # 90% train, 10% validation split
-split_idx = int(len(all_patients)*0.99)
+split_idx = int(len(all_patients)*0.90)
 
 SPLITS = {1:{
     'train': [os.path.join(data_directory, all_patients[i]) for i in range(split_idx)],
