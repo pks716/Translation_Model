@@ -59,14 +59,9 @@ SPLITS = {
 }
 
 if __name__ == '__main__':
-    print(f"Total patients: {len(all_patients)}")
-    print(f"Fold sizes: {fold_sizes}")
-    print()
+    from train_dataloader import train_dataset
+    from test_dataloader import test_dataset
+    from training_hyperparameters import HP
     
-    for fold, splits in SPLITS.items():
-        print(f"Fold {fold}:")
-        print(f"  Train: {len(splits['train'])} patients")
-        print(f"  Validation: {len(splits['validation'])} patients")
-        print(f"  Train %: {len(splits['train'])/len(all_patients)*100:.1f}%")
-        print(f"  Val %: {len(splits['validation'])/len(all_patients)*100:.1f}%")
-        print()
+    for key, splitc in SPLITS.items(): 
+        print(f"Split {key}: Train={len(train_dataset(splitc['train']))}, Val={sum(len(test_dataset(p, HP['training_type'])) for p in splitc['validation'])}")

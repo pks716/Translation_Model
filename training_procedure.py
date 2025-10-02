@@ -14,16 +14,14 @@ import torchvision.transforms.functional as TF
 import torch.nn.functional as F
 import pandas as pd
 from training_hyperparameters import *
-from splits import SPLITS
+from splits_only_val import SPLITS
+# from splits_only_test import SPLITS  #for testing only
 from train_dataloader import train_dataset
 from test_dataloader import test_dataset
 from ESAU_net import ESAU
-from PTN_model2D import PTN_local
 from residual_transformers import ResViT
 from transformer_configs import get_resvit_b16_config, get_resvit_l16_config
-from swin_unet_v2 import SwinTransformerSys
 from CGNet_arch import CascadedGaze
-from unet import UNet
 from training_helpers import post_processing_order
 from tqdm import tqdm
 from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
@@ -32,7 +30,6 @@ from torchvision.utils import make_grid, save_image
 from torchvision.models.feature_extraction import create_feature_extractor
 import torchvision
 import json
-from resvit_conditional import ConditionalResViTWrapper 
 
 if wand_db_boolean:
     import wandb
@@ -45,35 +42,113 @@ CT will always be the first argument returnned by the dataloader
 
 '''
 
-
 base_path = f"sessions/{EXPERIMENT_NAME}"
 
-# Boilerplate model loading and saving
-def save_checkpoint(model, optimizer, scheduler, epoch, path):
+class SimpleDiscriminator(nn.Module):
+    def __init__(self, spatial_dims=2, num_in_ch=1, num_feat=64, input_size=[256, 256]):
+        super(SimpleDiscriminator, self).__init__()
+        self.spatial_dims = spatial_dims
+        self.input_size = input_size
+        
+        conv_module = nn.Conv2d
+        norm_module = nn.LayerNorm
+        
+        # Conv blocks
+        self.convs = nn.Sequential(
+            # First conv layer
+            conv_module(num_in_ch, num_feat, 3, 1, 1, bias=True),
+            nn.LeakyReLU(inplace=True, negative_slope=0.2),
+            
+            # Conv with stride=2
+            conv_module(num_feat, num_feat, 3, 2, 1, bias=False),  # /2
+            nn.BatchNorm2d(num_feat), 
+            nn.LeakyReLU(inplace=True, negative_slope=0.2),
+            
+            # Conv-stride 1
+            conv_module(num_feat, num_feat*2, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_feat*2),
+            nn.LeakyReLU(inplace=True, negative_slope=0.2),
+            
+            conv_module(num_feat*2, num_feat*2, 3, 2, 1, bias=False),  # /4
+            nn.BatchNorm2d(num_feat*2),
+            nn.LeakyReLU(inplace=True, negative_slope=0.2),
+            
+            # Conv-stride 2
+            conv_module(num_feat*2, num_feat*4, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_feat*4),
+            nn.LeakyReLU(inplace=True, negative_slope=0.2),
+            
+            conv_module(num_feat*4, num_feat*4, 3, 2, 1, bias=False),  # /8
+            nn.BatchNorm2d(num_feat*4),
+            nn.LeakyReLU(inplace=True, negative_slope=0.2),
+            
+            # Conv-stride 3
+            conv_module(num_feat*4, num_feat*8, 3, 1, 1, bias=False),
+            nn.BatchNorm2d(num_feat*8),
+            nn.LeakyReLU(inplace=True, negative_slope=0.2),
+            
+            conv_module(num_feat*8, num_feat*8, 3, 2, 1, bias=False),  # /16
+            nn.BatchNorm2d(num_feat*8),
+            nn.LeakyReLU(inplace=True, negative_slope=0.2),
+        )
+        
+        # Add final 1x1 conv to get patch predictions
+        self.final_conv = conv_module(num_feat*8, 1, kernel_size=1)
+    
+    def forward(self, x):
+        if isinstance(x, dict):
+            x = x['level_0']
+        feat2d = self.convs(x)
+        out = self.final_conv(feat2d)  # Output shape: [B, 1, 16, 16]
+        return out
+
+
+# Boilerplate model loading and saving for GAN
+def save_checkpoint_gan(generator, discriminator, optimizer_g, optimizer_d, scheduler_g, scheduler_d, epoch, path):
     if '/' in path:
         name = path.split('/')[-1]
         directory = os.path.dirname(path)
-        os.makedirs(directory, exist_ok=True)       # Create directories if they don't exist
+        os.makedirs(directory, exist_ok=True)
     torch.save({
         'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict()
+        'generator_state_dict': generator.state_dict(),
+        'discriminator_state_dict': discriminator.state_dict(),
+        'optimizer_g_state_dict': optimizer_g.state_dict(),
+        'optimizer_d_state_dict': optimizer_d.state_dict(),
+        'scheduler_g_state_dict': scheduler_g.state_dict(),
+        'scheduler_d_state_dict': scheduler_d.state_dict()
     }, path)
 
-def load_checkpoint(model, optimizer, scheduler, checkpoint, device=None):
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint.get('model_state_dict', {}))
+def load_checkpoint_gan(generator, discriminator, optimizer_g, optimizer_d, scheduler_g, scheduler_d, checkpoint, device=None):
+    if 'generator_state_dict' in checkpoint:
+        generator.load_state_dict(checkpoint.get('generator_state_dict', {}))
     else:
-        ValueError("Check point does not contain hey for model_state_dict")
-    if 'optimizer_state_dict' in checkpoint:
-        optimizer.load_state_dict(checkpoint.get('optimizer_state_dict',{}))
+        ValueError("Check point does not contain key for generator_state_dict")
+    
+    if 'discriminator_state_dict' in checkpoint:
+        discriminator.load_state_dict(checkpoint.get('discriminator_state_dict', {}))
     else:
-        ValueError("Check point does not contain key for optimizer_state_dict")
-    if 'scheduler_state_dict' in checkpoint:
-        scheduler.load_state_dict(checkpoint.get('scheduler_state_dict',{}))
+        ValueError("Check point does not contain key for discriminator_state_dict")
+        
+    if 'optimizer_g_state_dict' in checkpoint:
+        optimizer_g.load_state_dict(checkpoint.get('optimizer_g_state_dict',{}))
     else:
-        ValueError("Check point does not contain key for scheduler_state_dict")
+        ValueError("Check point does not contain key for optimizer_g_state_dict")
+        
+    if 'optimizer_d_state_dict' in checkpoint:
+        optimizer_d.load_state_dict(checkpoint.get('optimizer_d_state_dict',{}))
+    else:
+        ValueError("Check point does not contain key for optimizer_d_state_dict")
+        
+    if 'scheduler_g_state_dict' in checkpoint:
+        scheduler_g.load_state_dict(checkpoint.get('scheduler_g_state_dict',{}))
+    else:
+        ValueError("Check point does not contain key for scheduler_g_state_dict")
+        
+    if 'scheduler_d_state_dict' in checkpoint:
+        scheduler_d.load_state_dict(checkpoint.get('scheduler_d_state_dict',{}))
+    else:
+        ValueError("Check point does not contain key for scheduler_d_state_dict")
         
 def model_restore_state(check_point_path):
     model_ckpt_name = check_point_path.split('/')[-1]
@@ -82,17 +157,12 @@ def model_restore_state(check_point_path):
     print(epoch)
     print(splitd)
     
-    
     return int(epoch.split("_")[1]), int(splitd.split("_")[1])
-    
-    
 
-def load_checkpoint_eval(model, checkpoint_path, devvicee):
-    checkpoint = torch.load(checkpoint_path, map_location=devvicee)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    return model
-
-
+def load_checkpoint_eval_gan(generator, checkpoint_path, device):
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    generator.load_state_dict(checkpoint['generator_state_dict'])
+    return generator
 
 def convert_to_dict(x):
     if isinstance(x, torch.Tensor):
@@ -180,7 +250,7 @@ class CombinedLoss(nn.Module):
         
         # Create VGG19 feature extractor
         model_name = 'vgg19'
-        return_nodes = ['features.35']  # Single layer for reduced complexity
+        return_nodes = ['features.35']
         
         pretrained = define_pretrained(model_name).eval()
         feature_extractor = create_feature_extractor(pretrained, return_nodes)
@@ -191,7 +261,7 @@ class CombinedLoss(nn.Module):
             loss_fn=nn.L1Loss(),
             channel_dim=3,
             separate_channel=True,
-            base_weight=1.0  # Single layer so base_weight = 1
+            base_weight=1.0 
         )
         
         self.l1_weight = l1_weight
@@ -203,8 +273,31 @@ class CombinedLoss(nn.Module):
         
         total_loss = self.l1_weight * l1 + self.perceptual_weight * perceptual
         return total_loss
+
+# Modified Hybrid Loss with Adversarial Training
+class AdversarialHybridLoss(nn.Module):
+    def __init__(self, beta=1.0, gamma=0.0001): 
+        super().__init__()
+        self.beta = beta    # Weight for regression (Combined L1 + Perceptual)
+        self.gamma = gamma  # Weight for adversarial loss
+        
+        # Use the combined loss for regression (L1 + Perceptual)
+        self.combined_loss = CombinedLoss(l1_weight=1.0, perceptual_weight=0.1, device=DEVICE)
+        self.adversarial_loss = nn.BCEWithLogitsLoss()
     
-criterion = CombinedLoss(l1_weight=1.0, perceptual_weight=0.1, device=DEVICE)
+    def forward(self, pred_continuous, target, discriminator_fake_output=None, mode='generator'):
+        # Combined regression loss (L1 + Perceptual)
+        regression_loss = self.combined_loss(pred_continuous, target)
+        
+        if mode == 'generator' and discriminator_fake_output is not None:
+            # Adversarial loss - generator wants discriminator to classify fake as real
+            real_labels = torch.ones_like(discriminator_fake_output)
+            adversarial_loss = self.adversarial_loss(discriminator_fake_output, real_labels)
+            
+            return (self.beta * regression_loss + 
+                   self.gamma * adversarial_loss)
+        else:
+            return self.beta * regression_loss
 
 # Metrics calculation
 def calculate_val_metrics(output, target):
@@ -213,57 +306,39 @@ def calculate_val_metrics(output, target):
     ssim_value = ssim(output, target, data_range=1.0, size_average=True)
     return psnr.item(), ssim_value.item()
 
-split_resolved, epoch_resolved = True, True, 
+
+split_resolved, epoch_resolved = True, True
 if continue_path:
-    split_resolved, epoch_resolved = False, False, 
+    split_resolved, epoch_resolved = False, False
 
 for key, splitc in SPLITS.items():
     config = get_resvit_b16_config()
-    # conditional_wrapper = ConditionalResViTWrapper(config, DEVICE, conditioning_mode='fusion_gate')
-    # optimizer = conditional_wrapper.setup_optimizer(lr=HP['learning_rate'])
     model = ESAU("Converter",in_channels=1,n_channels=HP['model_params']['num_channels'],out_channels=1).to(DEVICE)
-    # model = ResViT(config=config, input_dim=1, img_size=256, output_dim=1, vis=False).to(DEVICE)
-    # model = UNet(in_channels=1, num_classes=1, base_channels=32, bilinear=True).to(DEVICE)
-    # model = PTN_local(img_size=[256,256]).to(DEVICE)
-#     model = CascadedGaze(
-#     img_channel=1,               
-#     width=16,                    
-#     middle_blk_num=5,           
-#     enc_blk_nums=[1, 1, 2, 3],   
-#     dec_blk_nums=[1, 1, 1, 1],   
-#     GCE_CONVS_nums=[3, 3, 2, 2]  
-# ).to(DEVICE)
     
-#     model = SwinTransformerSys(
-#     img_size=256,
-#     patch_size=4,
-#     in_chans=1,
-#     num_classes=1,
-#     embed_dim=192,           # 2x capacity: 96 → 192
-#     depths=[2, 2, 8, 2],     # Deeper bottleneck
-#     depths_decoder=[2, 8, 2, 2],
-#     num_heads=[6, 12, 24, 48],
-#     window_size=8,
-#     mlp_ratio=6.,            # Larger MLP: 4 → 6
-#     drop_path_rate=0.3
-# ).to(DEVICE)
+    #Use during trsting form loading weights
+    # model.load_state_dict(torch.load('/', map_location=DEVICE)['generator_state_dict'])
+    
+    # Create discriminator
+    discriminator = SimpleDiscriminator(spatial_dims=2, num_in_ch=2, num_feat=64, input_size=[256, 256]).to(DEVICE)
+    
+    # Optimizers for both generator and discriminator
+    optimizer_G = optim.Adam(model.parameters(), lr=HP['learning_rate'])
+    optimizer_D = optim.Adam(discriminator.parameters(), lr=HP['learning_rate'] * 0.5)  # Slower learning for discriminator
+    
+    scheduler_G = StepLR(optimizer_G, step_size=10, gamma=0.5)
+    scheduler_D = StepLR(optimizer_D, step_size=10, gamma=0.5)
 
-    model.load_state_dict(torch.load('/home/pks/Desktop/Peeyush/Project/pelvis/MRI_CT_models/MRI_CT_Models-main/sessions/ESAUNet_base_synth/SPLIT_1/model_weights/psnr/epoch_99__split_1__.pth', map_location=DEVICE)['model_state_dict'])
-
-
-    optimizer = optim.Adam(model.parameters(), lr=HP['learning_rate'])
-    scheduler = StepLR(optimizer, step_size=10, gamma=0.5)
+    criterion = AdversarialHybridLoss(beta=1.0, gamma=0.0001)
     
     best_models_psnr = deque(maxlen=3)
     best_models_ssim = deque(maxlen=3)
     
-    
-
     if not split_resolved:
-        e, spll =  model_restore_state(continue_path)
-        if key < spll :
+        e, spll = model_restore_state(continue_path)
+        if key < spll:
             continue
-        load_checkpoint(model, optimizer, scheduler, continue_path)
+        checkpoint = torch.load(continue_path, map_location=DEVICE)
+        load_checkpoint_gan(model, discriminator, optimizer_G, optimizer_D, scheduler_G, scheduler_D, checkpoint)
                     
         top_location = ""
         for ele in continue_path.split('/'):
@@ -277,6 +352,7 @@ for key, splitc in SPLITS.items():
             best_models_ssim = pickle.load(f)
             
         split_resolved = True
+        
     if wand_db_boolean:
         run = wandb.init(project=PROJECT, 
                         name = f"{EXPERIMENT_NAME} Split-{key}",
@@ -300,50 +376,94 @@ for key, splitc in SPLITS.items():
             epoch_resolved = True
         
         ######################################
-
+        # Training phase with adversarial training
         model.train()
-        train_dataloader = tqdm(train_dataloader, desc=f"Split {key} Training Epoch {epoch+1}/{HP['epochs']}", leave=True)
-        # Example: Fetch one batch
-        for idx, (ct_batch, mr_batch , mask) in enumerate(train_dataloader):
+        discriminator.train()
+        
+        train_dataloader_tqdm = tqdm(train_dataloader, desc=f"Split {key} Training Epoch {epoch+1}/{HP['epochs']}", leave=True)
+        
+        total_g_loss = 0
+        total_d_loss = 0
+        
+        for idx, (ct_batch, mr_batch, mask) in enumerate(train_dataloader_tqdm):
             ct_batch, mr_batch, mask = ct_batch.to(DEVICE), mr_batch.to(DEVICE), mask.to(DEVICE)
-        # for idx, (ct_batch, mr_batch) in enumerate(train_dataloader):
-        #     ct_batch, mr_batch = ct_batch.to(DEVICE), mr_batch.to(DEVICE)
             ct_batch = ct_batch.unsqueeze(1)
             mr_batch = mr_batch.unsqueeze(1)
             mask = mask.unsqueeze(1)
             
-            mr_fake = model(ct_batch)
-
+            batch_size = ct_batch.size(0)
             binary_mask = (mask > 0.5).float()
+            mr_batch_masked = mr_batch * binary_mask  # Fixed: assign to new variable
+            
+            # ===============================
+            # Train Discriminator
+            # ===============================
+            optimizer_D.zero_grad()
+            
+            # Real images
+            real_pair = torch.cat([ct_batch, mr_batch_masked], dim=1)  # [B, 2, H, W]
+            real_output = discriminator(real_pair)
+            real_labels = torch.ones_like(real_output)
+            d_real_loss = criterion.adversarial_loss(real_output, real_labels)
+            
+            # Fake images
+            mr_fake = model(ct_batch)
             mr_fake_masked = mr_fake * binary_mask
-            mr_batch_masked = mr_batch * binary_mask
+            
+            fake_pair = torch.cat([ct_batch, mr_fake_masked.detach()], dim=1)  # [B, 2, H, W]
+            fake_output = discriminator(fake_pair)
+            fake_labels = torch.zeros_like(fake_output)
+            d_fake_loss = criterion.adversarial_loss(fake_output, fake_labels)
+            
+            d_loss = d_real_loss + d_fake_loss
+            d_loss.backward()
+            optimizer_D.step()
+            
+            # ===============================
+            # Train Generator
+            # ===============================
+            optimizer_G.zero_grad()
+            
+            # Get discriminator output for generator training
+            fake_pair = torch.cat([ct_batch, mr_fake_masked], dim=1)  # [B, 2, H, W]
+            fake_output = discriminator(fake_pair)
+            
+            # Generator loss (regression + adversarial)
+            g_loss = criterion(mr_fake_masked, mr_batch_masked, fake_output, mode='generator')  # Fixed: variable names
+            
+            g_loss.backward()
+            optimizer_G.step()
+            
+            total_g_loss += g_loss.item()
+            total_d_loss += d_loss.item()
+            
+            train_dataloader_tqdm.set_postfix(
+                G_loss=g_loss.item(),
+                D_loss=d_loss.item()
+            )
 
-            optimizer.zero_grad()
-            
-            loss =  criterion(mr_fake_masked, mr_batch_masked)
-            
-            loss.backward()
-            optimizer.step()
-            train_dataloader.set_postfix(batch_loss=loss.item())
-                
-        scheduler.step()
+        # Move schedulers outside the batch loop
+        scheduler_G.step()
+        scheduler_D.step()
+
+        avg_g_loss = total_g_loss / len(train_dataloader)
+        avg_d_loss = total_d_loss / len(train_dataloader)
         
         if wand_db_boolean:
             wandb.log({
-                "epoch": epoch,  # Explicitly log the epoch
-                "Train_loss" : loss,
-                'tag' : "Training Loss",
-                'step' : epoch
-
+                "epoch": epoch,
+                "Generator_Loss": avg_g_loss,
+                "Discriminator_Loss": avg_d_loss,
+                'tag': "Training Loss",
+                'step': epoch
             })
-            
-        
         
         ##########################################################################################
         
         model.eval()
+        discriminator.eval()
         
-        # ADD: Store per-patient metrics
+        # Store per-patient metrics
         patient_metrics = {'PSNR': [], 'SSIM': [], 'MSE': [], 'MAE': []}
         
         validation_metrics_epoch = {
@@ -359,87 +479,87 @@ for key, splitc in SPLITS.items():
             model_path_val = f"{split_base_path}/model_weights"
             os.makedirs(f"{model_path_val}/ssim", exist_ok=True)
             os.makedirs(f"{model_path_val}/psnr", exist_ok=True)
-            val_index= 0
+            val_index = 0
             splitc['validation'] = [ele for ele in splitc['validation'] if '.DS_Store' not in ele]
             validation_loop = tqdm(splitc['validation'], desc=f"Split {key} Validation Loop {val_index+1}/{len(splitc['validation'])}", leave=True)
             
-            for val_scan_index, scan in enumerate(validation_loop): 
-                # if val_scan_index ==0:
+            for val_scan_index, scan in enumerate(validation_loop):
                 save_array_val = []
-                combined_grid_val = []      
-
+                combined_grid_val = []
                 validation_DS = test_dataset(scan, HP['training_type'])
-                
                 validation_loader = DataLoader(validation_DS, batch_size=HP['batch_size'], shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True,
-                             prefetch_factor=2)
-
+                                            prefetch_factor=2)
                 scan_name_val = scan.split('/')[-1]
-
-                #Per-patient accumulation
+                
+                # Per-patient accumulation
                 patient_psnr_total = 0.0
                 patient_ssim_total = 0.0
                 patient_mse_total = 0.0
                 patient_mae_total = 0.0
-                patient_slice_count = 0                
+                patient_slice_count = 0
                 
-                # Example: Fetch one batch
                 for idx, (ct, mr, mask) in enumerate(validation_loader):
-                # for idx, (ct, mr) in enumerate(validation_loader):
-                    #CT2MR
+                    # CT2MR
                     source_real = ct.to(DEVICE).unsqueeze(1)
                     target_real = mr.to(DEVICE).unsqueeze(1)
-                    mask = mask.to(DEVICE)
+                    mask = mask.to(DEVICE).unsqueeze(1) 
                     
-                    target_fake = model(source_real)
-                                        
+                    # Create binary mask
+                    binary_mask = (mask > 0.5).float()
+                    target_real_masked = target_real * binary_mask
+                    
+                    target_fake = model(source_real)  # [B, 1, H, W]
+                    
                     for fn in post_processing_order:
                         target_fake = fn(target_fake)
                         
-                    target_size = (target_real.shape[2],target_real.shape[3])
+                    target_size = (target_real.shape[2], target_real.shape[3])
                     target_fake = F.interpolate(target_fake, size=target_size, mode=HP['inference_interpolation_mode'], align_corners=HP['inference_interpolation_allign_cornors']).to(DEVICE)
                     
+                    target_fake_masked = target_fake * binary_mask  # Apply mask to fake target
+                    target_fake_masked = torch.clamp(target_fake_masked, 0, 1)
                     
-                    
-                    target_fake = target_fake*mask.unsqueeze(1)
-                    target_real = target_real*mask.unsqueeze(1)
-                    
-                    target_fake = torch.clamp(target_fake, 0, 1)
-
-                    # CHANGE: Accumulate for this patient only
+                    # Accumulate for this patient only
                     batch_size = source_real.shape[0]
-                    patient_psnr_total += psnr(target_real, target_fake).mean().item() * batch_size
-                    patient_ssim_total += ssim(target_real, target_fake).mean().item() * batch_size
-                    patient_mse_total += F.mse_loss(target_real, target_fake).item() * batch_size
-                    patient_mae_total += F.l1_loss(target_real, target_fake).item() * batch_size
+                    patient_psnr_total += psnr(target_real_masked, target_fake_masked).mean().item() * batch_size
+                    patient_ssim_total += ssim(target_real_masked, target_fake_masked).mean().item() * batch_size
+                    patient_mse_total += F.mse_loss(target_real_masked, target_fake_masked).item() * batch_size
+                    patient_mae_total += F.l1_loss(target_real_masked, target_fake_masked).item() * batch_size
                     patient_slice_count += batch_size
                     
+                    # For visualization, you can choose masked or unmasked versions
+                    # Option 1: Use masked versions for grids (recommended for consistency)
+                    grid_fake = make_grid(target_fake_masked, nrow=target_fake_masked.shape[0], padding=2)
+                    grid_real = make_grid(target_real_masked, nrow=target_real_masked.shape[0], padding=2)
                     
-                    grid_fake = make_grid(target_fake, nrow=target_fake.shape[0], padding=2)
-                    grid_real = make_grid(target_real, nrow=target_real.shape[0], padding=2)
-                
-                
-                
-                    # if val_scan_index == 0:
-                    combined = torch.cat([target_real.squeeze(1), target_fake.squeeze(1)], dim=-1)
+                    # Option 2: If you want to show unmasked for visualization purposes
+                    # grid_fake = make_grid(target_fake, nrow=target_fake.shape[0], padding=2)
+                    # grid_real = make_grid(target_real, nrow=target_real.shape[0], padding=2)
+                    
+                    # For saved arrays, use masked versions for consistency with metrics
+                    combined = torch.cat([target_real_masked.squeeze(1), target_fake_masked.squeeze(1)], dim=-1)
                     save_array_val.append(combined)
                     combined_grid_val.append(torch.cat((grid_real, grid_fake), dim=1))
-                    val_index+=1  
+                    val_index += 1
 
-
-
-                # ADD: Calculate per-patient averages and store
+                # Calculate per-patient averages and store
                 patient_metrics['PSNR'].append(patient_psnr_total / patient_slice_count)
                 patient_metrics['SSIM'].append(patient_ssim_total / patient_slice_count)
                 patient_metrics['MSE'].append(patient_mse_total / patient_slice_count)
                 patient_metrics['MAE'].append(patient_mae_total / patient_slice_count)
                     
-  
-                # if val_scan_index == 0:
                 eval_scanvv = torch.cat(save_array_val, dim=0) 
                 eval_scanvv = eval_scanvv.cpu().numpy()
                 os.makedirs(f"{split_base_path}/validation", exist_ok=True)
-                # np.save(f"{split_base_path}/validation/{scan_name_val}_{epoch}.npy", eval_scanvv)
-                combined_grid_val = torch.cat(combined_grid_val, dim=2)
+                if combined_grid_val:
+                    max_height = max(grid.shape[1] for grid in combined_grid_val)
+                    padded_grids = []
+                    for grid in combined_grid_val:
+                        if grid.shape[1] < max_height:
+                            padding = max_height - grid.shape[1]
+                            grid = F.pad(grid, (0, 0, 0, padding), mode='constant', value=0)
+                        padded_grids.append(grid)
+                    combined_grid_val = torch.cat(padded_grids, dim=2)
                 save_image(combined_grid_val, f"{split_base_path}/validation/{scan_name_val}_{epoch}.png")
                 if wand_db_boolean:
                     wandb.log({f"Validation Generation Split_{key}": wandb.Image(f"{split_base_path}/validation/{scan_name_val}_{epoch}.png"),
@@ -447,12 +567,9 @@ for key, splitc in SPLITS.items():
                                    'tag' : "Validation Image",
                                    'caption' : f"{scan_name_val}_{epoch}_{key} Validation",
                                     "epoch" : epoch,
-                                   
                                 })
-                        # val_img_artifact.add_file(f"{split_base_path}/validation/{scan_name_val}_{epoch}.png", name=f"Epoch {epoch}.png")
-                    
                         
-        # CHANGE: Calculate final averages across patients (not slices)
+        # Calculate final averages across patients (not slices)
         validation_metrics_epoch['ValidationPSNR'] = np.mean(patient_metrics['PSNR'])
         validation_metrics_epoch['ValidationSSIM'] = np.mean(patient_metrics['SSIM'])
         validation_metrics_epoch['ValidationMSE'] = np.mean(patient_metrics['MSE'])
@@ -470,33 +587,28 @@ for key, splitc in SPLITS.items():
         with open(f"{split_base_path}/validation_averages/fold_{key}_epoch_{epoch}.json", "w") as f:
             json.dump(fold_validation_results, f, indent=2)
 
-
         samples = 0 # Creating div by 0 in case of an error
-        
-        
         
         best_models_psnr.append((validation_metrics_epoch['ValidationPSNR'], f"{model_path_val}/psnr/epoch_{epoch}__split_{key}__.pth"))
         best_models_ssim.append((validation_metrics_epoch['ValidationSSIM'], f"{model_path_val}/ssim/epoch_{epoch}__split_{key}__.pth"))
         
-        
         if wand_db_boolean:
             wandb.log(validation_metrics_epoch)
         
-        # Resume logic []
+        # Resume logic
         best_models_psnr = deque(sorted(best_models_psnr, reverse=True)[:3], maxlen=3)
         best_models_ssim = deque(sorted(best_models_ssim, reverse=True)[:3], maxlen=3)
         
         top_models_pnsr = set(m[1] for m in best_models_psnr)
         top_models_ssim = set(m[1] for m in best_models_ssim)
         
-        
         if f"{model_path_val}/psnr/epoch_{epoch}__split_{key}__.pth" in top_models_pnsr:
-            save_checkpoint(model, optimizer, scheduler,epoch, f"{model_path_val}/psnr/epoch_{epoch}__split_{key}__.pth")
+            save_checkpoint_gan(model, discriminator, optimizer_G, optimizer_D, scheduler_G, scheduler_D, epoch, f"{model_path_val}/psnr/epoch_{epoch}__split_{key}__.pth")
             with open(f"{model_path_val}/Top3PSNR.pkl","wb") as f:
                 pickle.dump(best_models_psnr, f)
         
         if f"{model_path_val}/ssim/epoch_{epoch}__split_{key}__.pth" in top_models_ssim:
-            save_checkpoint(model, optimizer, scheduler,epoch, f"{model_path_val}/ssim/epoch_{epoch}__split_{key}__.pth")
+            save_checkpoint_gan(model, discriminator, optimizer_G, optimizer_D, scheduler_G, scheduler_D, epoch, f"{model_path_val}/ssim/epoch_{epoch}__split_{key}__.pth")
             with open(f"{model_path_val}/Top3SSIM.pkl", "wb") as f:
                 pickle.dump(best_models_ssim, f)
             
@@ -530,129 +642,3 @@ for key, splitc in SPLITS.items():
             })
         run.finish()   
 
-    
-    
-######################################################################################################
-# ######################################################################################################
-# ##########                                                                   #########################
-# ##########                    TESTING LOGIC                                  #########################
-# ##########                                                                   #########################
-# ######################################################################################################
-# ######################################################################################################
-
-#     # PSNR LEAD VALIDATION STRATERGY 
-    
-#     print('Evaluating for top PSNR model')
-#     model = load_checkpoint_eval(model, best_models_psnr[0][1], DEVICE)
-    
-#     testing_metrics = {
-#         'TestingPSNR': 0,
-#         'TestingSSIM' : 0,
-#         'TestingMAE' : 0,
-#         'TestingMSE' : 0,
-#         'samples': 0,
-#         'tag' : "Testing",
-#         'epoch' : key,
-#         'SPLIT' : key,
-#         'step' : key,
-        
-#     }
-#     model.eval()
-#     with torch.no_grad():
-#         model_path_testing = f"{split_base_path}/testing/psnr"
-#         os.makedirs(f"{model_path_testing}/samples", exist_ok=True)
-#         test_index = 0
-#         splitc['test'] = [ele for ele in splitc['test']]
-#         testing_loop = tqdm(splitc['test'], desc=f"Split {key} Testing Loop {test_index+1}/{len(splitc['test'])}", leave=True)
-        
-#         for ggdz, scan in enumerate(testing_loop):
-#             # b, h, w
-#             testing_DS = test_dataset(scan, HP['training_type'])
-#             train_dataloader = DataLoader(testing_DS, batch_size=HP['batch_size'], shuffle=False)
-
-#             scan_name = scan.split('/')[-1]
-#             # print(scan_name)
-#             scans_produced = []
-            
-#             combined_grid = []
-            
-#             # Example: Fetch one batch
-#             for idx, (ct, mr, mask) in enumerate(train_dataloader):
-
-#                 # b,h,w
-#                 #CT2MR
-#                 source_real = ct.to(DEVICE).unsqueeze(1)
-#                 target_real = mr.to(DEVICE).unsqueeze(1)
-#                 mask = mask.to(DEVICE).unsqueeze(1)
-                
-#                 testing_metrics['samples'] +=  source_real.shape[0] # Since SSIM/PSNR will be already mean when saved.
-                
-#                 target_fake = model(source_real)
-                
-#                 for fn in post_processing_order:
-#                     target_fake = fn(target_fake)
-                    
-#                 # this case the target for normalization in only going to be the processed modality.
-#                 target_size = (target_real.shape[2],target_real.shape[3])
-#                 target_fake = F.interpolate(target_fake, size=target_size, mode=HP['inference_interpolation_mode'], align_corners=HP['inference_interpolation_allign_cornors'])
-                
-#                 target_fake = target_fake
-#                 target_real = target_real
-                
-#                 target_fake = torch.clamp(target_fake, 0, 1)
-#                 grid_fake = make_grid(target_fake, nrow=target_fake.shape[0])
-#                 grid_real = make_grid(target_real, nrow=target_real.shape[0])
-                
-                
-                
-#                 combined_grid.append(torch.cat((grid_real, grid_fake), dim=1))
-                
-                
-#                 testing_metrics['TestingSSIM'] += ssim(target_real, target_fake).mean().item() * source_real.shape[0]
-#                 testing_metrics['TestingPSNR'] += psnr(target_real, target_fake).mean().item() * source_real.shape[0]
-#                 testing_metrics['TestingMSE'] +=  F.mse_loss(target_real, target_fake).item()
-#                 testing_metrics['TestingMAE'] +=  F.l1_loss(target_real, target_fake).item()
-                
-#                 target_fake = target_fake.squeeze(1)
-#                 target_real = target_real.squeeze(1)
-                 
-#                 combined = torch.cat([target_real, target_fake], dim=-1)
-#                 scans_produced.append(combined)
-            
-
-#             try:
-#                 combined_grid = torch.cat(combined_grid, dim=2)
-#                 eval_scan = torch.cat(scans_produced, dim=0)  # Ensure dim=0 for batch concatenation
-#                 np.save(f"{model_path_testing}/samples/{scan_name}.npy", eval_scan.cpu())
-#                 ASD = [ele.shape for ele in combined_grid]
-#                 print("combined shape", combined_grid.shape)
-#                 save_image(combined_grid, f"{model_path_testing}/samples/{scan_name}.png")
-#                 if wand_db_boolean:
-#                     wandb.log({f"Testing Generation Split_{key}": wandb.Image(f"{model_path_testing}/samples/{scan_name}.png"),
-#                         "step" : ggdz,
-#                         "epoch" : ggdz,
-                        
-#                         'tag' : "Testing Image",
-#                         'caption' : f"{scan_name}_{epoch}_{key} Testing"
-                        
-#                     })
-#             except RuntimeError as e:
-#                 print(f"Skipped visualization for {scan_name}")
-
-            
-#             test_index+=1
-                
-                
-#     testing_metrics['TestingPSNR'] = testing_metrics['TestingPSNR']/testing_metrics['samples']
-#     testing_metrics['TestingSSIM'] = testing_metrics['TestingSSIM']/testing_metrics['samples']
-#     testing_metrics['TestingMAE'] = testing_metrics['TestingMAE']/testing_metrics['samples']
-#     testing_metrics['TestingMSE'] = testing_metrics['TestingMSE']/testing_metrics['samples']
-#     if wand_db_boolean:
-#         wandb.log(testing_metrics)
-    
-#     df_test = pd.DataFrame.from_dict(testing_metrics, orient='index')
-#     df_test.to_csv(f"{model_path_testing}/SplitMetrics.csv", index_label="Epoch")
-    
-#     if wand_db_boolean:
-#         run.finish()
-            

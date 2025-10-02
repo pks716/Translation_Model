@@ -2,39 +2,35 @@ import cv2
 
 import subprocess
 
+#Use Tmux for sessions
 session_name = subprocess.check_output(["tmux", "display-message", "-p", "#S"], text=True).strip()
 
 
-wand_db_boolean = False
+wand_db_boolean = False #for wandb logging
 
-# PROJECT = "CT2_MR_Pelvis_only_T2W"
-PROJECT = "CT2_MR_Pelvis_only_T2W_rectal"
-EXPERIMENT_NAME = 'esau-rectal'
+PROJECT = "CT2_MR_Pelvis"
+EXPERIMENT_NAME = 'esau'
 continue_path = ""
 
 
-data_directory = "/home/pks/Desktop/Peeyush/Project/pelvis/MRI_CT_models/MRI_CT_Models-main/DataCreation/rectal/slices"
+data_directory = '/'
 
-# rm_DSStore(data_directory)
- # either 'MR2CT' or 'CT2MR'
-# This is only for dataloaders, changes in training_procedures need to be manual.
-# CT will always be the first argument returnned by the dataloader
 
-evaluating_run_boolean = True # Keep False while training
+evaluating_run_boolean = True 
 
 
 HP = {
     'DEVICE' : 'cuda:0',
 
     'model_params':{
-        'type': 'esau-atlas',
+        'type': 'esau',
         'num_channels': 32
     },
     'System': "Ruby",
     'TMUX' : session_name,
-    "batch_size": 1,
-    "learning_rate": 1e-3,
-    "epochs": 50,
+    "batch_size": 16,
+    "learning_rate": 1e-4,
+    "epochs": 100,
     'loss_weights' : {
 
     },

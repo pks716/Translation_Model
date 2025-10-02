@@ -53,8 +53,6 @@ class train_dataset(Dataset):
         mr = torch.tensor(mr, dtype=torch.float32)
         ct = torch.tensor(ct, dtype=torch.float32)
         
-        # mr = (mr-MR_MIN)/(MR_MAX-MR_MIN)
-        # ct = (ct-CT_MIN)/(CT_MAX-CT_MIN) 
         
         "DO AS YOU PLEASE HERE"
         

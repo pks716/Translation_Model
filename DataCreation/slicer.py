@@ -23,7 +23,7 @@ import argparse
 from multiprocessing import Pool
 import cv2
 
-from slicer_parameters import view, view_index_hh, destination_directory, data_directory, full_dataset, all_slices, per_sample_normalize, exclude_start_slices, exclude_end_slices, slice_size
+from slicer_parameters import view, view_index_hh, destination_directory, data_directory, full_dataset, all_slices, per_sample_normalize, exclude_start_slices, exclude_end_slices, slice_size, padding_size
 from pre_processing import pre_processing_order
 
 view_key, view_index = False, 4
@@ -68,14 +68,15 @@ def read_nifti_to_numpy(file_path):
         return None
 
 
-def crop_and_pad_with_mask(image_slice, mask_slice, target_size=(256, 256)):
+def crop_and_pad_with_mask(image_slice, mask_slice, padding_size=(608, 608), target_size=(256, 256)):
     """
     Crop the image slice using the mask to extract anatomy region,
-    then pad back to target size while preserving aspect ratio.
+    then pad to padding_size while preserving aspect ratio, finally resize to target_size.
     
     Args:
         image_slice: 2D numpy array of the image slice
         mask_slice: 2D numpy array of the mask slice (binary or non-zero values indicate anatomy)
+        padding_size: tuple of (height, width) for intermediate padding size
         target_size: tuple of (height, width) for final output size
     
     Returns:
@@ -107,29 +108,32 @@ def crop_and_pad_with_mask(image_slice, mask_slice, target_size=(256, 256)):
     
     # Calculate aspect ratio of cropped region
     crop_h, crop_w = cropped_image.shape
-    target_h, target_w = target_size
+    padding_h, padding_w = padding_size
     
-    # Calculate scaling to fit the cropped image into target size while preserving aspect ratio
-    scale_h = target_h / crop_h
-    scale_w = target_w / crop_w
+    # Calculate scaling to fit the cropped image into padding size while preserving aspect ratio
+    scale_h = padding_h / crop_h
+    scale_w = padding_w / crop_w
     scale = min(scale_h, scale_w)
     
-    # Resize cropped image
+    # Resize cropped image to fit within padding size
     new_h = int(crop_h * scale)
     new_w = int(crop_w * scale)
     resized_cropped = cv2.resize(cropped_image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     
-    # Create output image of target size
-    output_image = np.zeros(target_size, dtype=image_slice.dtype)
+    # Create padded image of padding_size
+    padded_image = np.zeros(padding_size, dtype=image_slice.dtype)
     
     # Calculate position to center the resized cropped image
-    start_y = (target_h - new_h) // 2
-    start_x = (target_w - new_w) // 2
+    start_y = (padding_h - new_h) // 2
+    start_x = (padding_w - new_w) // 2
     
-    # Place the resized cropped image in the center
-    output_image[start_y:start_y + new_h, start_x:start_x + new_w] = resized_cropped
+    # Place the resized cropped image in the center of padded image
+    padded_image[start_y:start_y + new_h, start_x:start_x + new_w] = resized_cropped
     
-    return output_image
+    # Finally resize to target size
+    final_image = cv2.resize(padded_image, target_size, interpolation=cv2.INTER_LINEAR)
+    
+    return final_image
 
 
 def populate(scan_path,
@@ -210,11 +214,11 @@ def populate(scan_path,
                 ct_slice = (ct_slice-ct_min)/(ct_max-ct_min)
             
             # Apply mask-based cropping and padding BEFORE other preprocessing
-            mr_slice_cropped = crop_and_pad_with_mask(mr_slice, mask, slice_size)
-            ct_slice_cropped = crop_and_pad_with_mask(ct_slice, mask, slice_size)
+            mr_slice_cropped = crop_and_pad_with_mask(mr_slice, mask,(padding_size, padding_size), slice_size)
+            ct_slice_cropped = crop_and_pad_with_mask(ct_slice, mask,(padding_size, padding_size), slice_size)
             
             # Also process the mask itself for consistency
-            mask_cropped = crop_and_pad_with_mask(mask.astype(np.float32), mask, slice_size)
+            mask_cropped = crop_and_pad_with_mask(mask.astype(np.float32), mask, (padding_size, padding_size), slice_size)
             
             ct_slice_processed, mr_slice_processed, mask_processed = np.copy(ct_slice_cropped), np.copy(mr_slice_cropped), np.copy(mask_cropped)
 

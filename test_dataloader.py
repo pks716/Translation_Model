@@ -47,8 +47,6 @@ class test_dataset(Dataset):
         self.ct_slices_processed, self.mr_slices_processed, self.mask_slices_processed = [], [], []
         self.ct_slices_original, self.mr_slices_original, self.mask_slices_original = [], [], []
 
-        # self.ct_slices_processed, self.mr_slices_processed = [], []
-        # self.ct_slices_original, self.mr_slices_original = [], []
 
         
         for scan_path in ct_path_processed:
@@ -87,12 +85,7 @@ class test_dataset(Dataset):
                 self.mask_slices_original.append(os.path.join(scan_path, slice))
         self.mask_slices_original = sorted(self.mask_slices_original)        
                 
-        # for slice in mr_paths:
-        #     self.mr_slices.append(slice)
-        # for slice in mask_paths:
-        #     self.mask_slices.append(slice)
-        # print(len(self.ct_slices))
-        # print(len(self.mr_slices))
+
         
         assert len(self.ct_slices_processed) == len(self.mr_slices_processed) == len(self.ct_slices_original) == len(self.mr_slices_original) #== len(self.mask_slices_original)== len(self.mask_slices_processed)  , "MR and CT folder lists must be the same length"
 
@@ -113,8 +106,6 @@ class test_dataset(Dataset):
             mr_processed = torch.tensor(mr_processed, dtype=torch.float32)
             
             
-            # mr_processed = (mr_processed-MR_MIN)/(MR_MAX-MR_MIN)
-            # ct_orignial = (ct_orignial-CT_MIN)/(CT_MAX-CT_MIN) 
             
             if self.mask_boolean:
                 mask = np.load(self.mask_slices_original[idx])['arr_0']
@@ -132,8 +123,6 @@ class test_dataset(Dataset):
             ct_processed = torch.tensor(ct_processed, dtype=torch.float32)
             mr_original = torch.tensor(mr_original, dtype=torch.float32)
             
-            # mr_original = (mr_original-MR_MIN)/(MR_MAX-MR_MIN)
-            # ct_processed = (ct_processed-CT_MIN)/(CT_MAX-CT_MIN) 
             
             if self.mask_boolean:
                 mask = np.load(self.mask_slices_original[idx])['arr_0']
@@ -146,15 +135,3 @@ class test_dataset(Dataset):
             raise ValueError("Only acceptable methods are MR2CT or CT2MR")
 
             
-
-
-
-# Example usage
-# if __name__ == "__main__":
-#     trr = train_dataset(SPLITS[1],'train')
-#     dataloader = DataLoader(trr, batch_size=4, shuffle=True)
-
-#     # Example: Fetch one batch
-#     for mr_batch, ct_batch, mask in dataloader:
-#         print(mr_batch.shape, ct_batch.shape)
-#         break
